@@ -1,0 +1,7 @@
+version: 2
+updates:
+  # Maintain dependencies for the cloud functions
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "monthly"
