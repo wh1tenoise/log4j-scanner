@@ -182,6 +182,19 @@ async def send_requests(client: httpx.AsyncClient, url: str, headers: dict, get_
                     timeout=3,
                 )
             )
+            if get_params:
+                query_string = '&'.join(
+                    [
+                        f"{key}={value}" for key, value in get_params.items()
+                    ]
+                )
+                opened_requests.append(
+                    client.get(
+                        f"{url}?{query_string}",
+                        headers=headers,
+                        timeout=3,
+                    )
+                )
         if post_params or headers != DEFAULT_HEADERS:
             logging.debug("Sending POST as Form")
             opened_requests.append(
