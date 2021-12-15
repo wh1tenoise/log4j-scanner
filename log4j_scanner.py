@@ -139,7 +139,7 @@ LOG_LEVELS = {
 }
 
 proxy = None
-obfuscate_payloads = True
+obfuscate_payloads = False
 request_path = None
 debug = True
 
@@ -224,7 +224,11 @@ async def test_injection_point(injection_type: InjectionPointType, callback_host
 
     for protocol in PROTOCOLS:
         logging.info(f"Testing the {protocol} protocol handler.")
-        payload = create_payload(callback_host, protocol, target_path, urlparse(url).netloc, is_domain_in_callback)
+        payload = create_payload(
+            callback_host, protocol,
+            target_path, urlparse(url).netloc,
+            is_domain_in_callback, obfuscate_payloads
+        )
         logging.debug(f"Using payload: {payload}")
         if injection_type == InjectionPointType.GetParam:
             params = {
@@ -289,7 +293,7 @@ def main():
 
     logging.basicConfig(
         level=LOG_LEVELS[arguments.log_level],
-        format='[%(asctime)s] {%(pathname)s:%(lineno)d} - %(levelname)s - %(message)s'
+        format='[%(asctime)s] {%(filename)s:%(lineno)d} - %(levelname)s - %(message)s'
     )
 
     if arguments.proxy:
