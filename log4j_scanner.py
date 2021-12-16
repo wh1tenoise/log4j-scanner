@@ -4,11 +4,12 @@ import base64
 import json
 import logging
 import random
+import smtplib
 import string
 import uuid
 from enum import Enum
 from time import sleep
-from urllib.parse import urlparse
+from urllib.parse import urlencode, urlparse
 
 import httpx
 from Crypto.Cipher import AES, PKCS1_OAEP
@@ -16,8 +17,8 @@ from Crypto.Hash import SHA256
 from Crypto.PublicKey import RSA
 from paramiko import SSHClient
 from paramiko.client import WarningPolicy
-from paramiko.ssh_exception import SSHException
 from imap_tools import MailBox
+from smtplib import SMTP
 
 
 class Dnslog:
@@ -327,8 +328,8 @@ class SshScanner(BaseScanner):
             try:
                 self._client.connect(hostname=hostname, port=port, username=payload, password=payload, timeout=3, look_for_keys=False, auth_timeout=2)
                 self._client.close()
-            except SSHException as e:
-                logging.exception(e)
+            except Exception as e:
+                logging.debug(e)
 
 
 class ImapScanner(BaseScanner):
@@ -354,7 +355,7 @@ class ImapScanner(BaseScanner):
                 mailbox.login(payload, payload, initial_folder=payload)
                 mailbox.logout()
             except Exception as e:
-                logging.exception(e)
+                logging.debug(e)
 
 
 class SmtpScanner(BaseScanner):
@@ -362,11 +363,40 @@ class SmtpScanner(BaseScanner):
     def __init__(self, obfuscate_payloads: bool, request_path: str) -> None:
         super().__init__(obfuscate_payloads, request_path)
 
+    def run_tests(self, target: str, callback_domain: str, no_payload_domain: bool, use_random_request_path: bool):
+        if ":" in target:
+            hostname, port = target.split(':')
+        else:
+            hostname = target
+            port = 25
+        logging.debug(f"Checking {hostname} on port {port} over SMTP.")
+        for protocol in PROTOCOLS:
+            payload = self.create_payload(
+                callback_domain, protocol,
+                self.request_path, target,
+                not no_payload_domain
+            )
+            try:
+                with SMTP(host=hostname, port=port) as smtp:
+                    smtp.login(payload, payload)
+            except Exception as e:
+                logging.debug(e)
+            try:
+                with SMTP(host=hostname, port=port) as smtp:
+                    smtp.auth
+            except Exception as e:
+                logging.debug(e)
+            try:
+                with SMTP(host=hostname, port=port) as smtp:
+                    smtp.sendmail(f"{smtplib.quoteaddr(payload)}@test.com", f"{smtplib.quoteaddr(payload)}@{hostname}", smtplib.quotedata(payload))
+            except Exception as e:
+                logging.debug(e)
+
 
 def parse_arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser("A scanner to check for the log4j vulnerability")
 
-    parser.add_argument('-p', '--protocol', help="which protocol to test", choices=["http", "ssh"], default="http", type=str)
+    parser.add_argument('-p', '--protocol', help="which protocol to test", choices=["http", "ssh", "imap", "smtp"], default="http", type=str)
     parser.add_argument('-t', '--target', help="The target to check", type=str, required=True)
     parser.add_argument('-o', '--obfuscate', help="Whether payloads should be obfuscated or not", default=False, action="store_true")
     parser.add_argument('--no-payload-domain', help="Whether the original domain should be removed from the payload", default=False, action="store_true")
@@ -389,7 +419,6 @@ def main():
         level=LOG_LEVELS[arguments.log_level],
         format='[%(asctime)s] {%(filename)s:%(lineno)d} - %(levelname)s - %(message)s'
     )
-    logging.debug(f"Got arguments {arguments}.")
     if arguments.proxy:
         global proxy
         proxy = arguments.proxy
@@ -412,6 +441,10 @@ def main():
         scanner = HttpScanner(arguments.obfuscate, arguments.request_path, arguments.proxy)
     elif arguments.protocol == "ssh":
         scanner = SshScanner(arguments.obfuscate, arguments.request_path)
+    elif arguments.protocol == "imap":
+        scanner = ImapScanner(arguments.obfuscate, arguments.request_path)
+    elif arguments.protocol == "smtp":
+        scanner = SmtpScanner(arguments.obfuscate, arguments.request_path)
 
     scanner.run_tests(
         arguments.target, callback_domain, not arguments.no_payload_domain, use_random_request_path
