@@ -17,6 +17,7 @@ from Crypto.PublicKey import RSA
 from paramiko import SSHClient
 from paramiko.client import WarningPolicy
 from paramiko.ssh_exception import SSHException
+from imap_tools import MailBox
 
 
 class Dnslog:
@@ -328,13 +329,32 @@ class SshScanner(BaseScanner):
                 self._client.close()
             except SSHException as e:
                 logging.exception(e)
-                pass
 
 
 class ImapScanner(BaseScanner):
 
     def __init__(self, obfuscate_payloads: bool, request_path: str) -> None:
         super().__init__(obfuscate_payloads, request_path)
+
+    def run_tests(self, target: str, callback_domain: str, no_payload_domain: bool, use_random_request_path: bool):
+        if ":" in target:
+            hostname, port = target.split(':')
+        else:
+            hostname = target
+            port = 993
+        logging.debug(f"Checking {hostname} on port {port} over IMAP.")
+        for protocol in PROTOCOLS:
+            payload = self.create_payload(
+                callback_domain, protocol,
+                self.request_path, target,
+                not no_payload_domain
+            )
+            try:
+                mailbox = MailBox(hostname, port=port)
+                mailbox.login(payload, payload, initial_folder=payload)
+                mailbox.logout()
+            except Exception as e:
+                logging.exception(e)
 
 
 class SmtpScanner(BaseScanner):

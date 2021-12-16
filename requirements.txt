@@ -2,3 +2,4 @@ httpx==0.21.1
 PyCryptodome==3.12.0
 requests==2.26.0
 paramiko==2.8.1
+imap-tools=0.50.1
