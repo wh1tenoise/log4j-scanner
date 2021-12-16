@@ -360,8 +360,9 @@ class ImapScanner(BaseScanner):
 
 class SmtpScanner(BaseScanner):
 
-    def __init__(self, obfuscate_payloads: bool, request_path: str) -> None:
+    def __init__(self, obfuscate_payloads: bool, request_path: str, local_hostname: str) -> None:
         super().__init__(obfuscate_payloads, request_path)
+        self._local_hostname = local_hostname
 
     def run_tests(self, target: str, callback_domain: str, no_payload_domain: bool, use_random_request_path: bool):
         if ":" in target:
@@ -377,12 +378,12 @@ class SmtpScanner(BaseScanner):
                 not no_payload_domain
             )
             try:
-                with SMTP(host=hostname, port=port) as smtp:
+                with SMTP(host=hostname, port=port, local_hostname=self._local_hostname) as smtp:
                     smtp.login(payload, payload)
             except Exception as e:
                 logging.debug(e)
             try:
-                with SMTP(host=hostname, port=port) as smtp:
+                with SMTP(host=hostname, port=port, local_hostname=self._local_hostname) as smtp:
                     smtp.sendmail(f"{smtplib.quoteaddr(payload)}@test.com", f"{smtplib.quoteaddr(payload)}@{hostname}", smtplib.quotedata(payload))
             except Exception as e:
                 logging.debug(e)
@@ -391,15 +392,18 @@ class SmtpScanner(BaseScanner):
 def parse_arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser("A scanner to check for the log4j vulnerability")
 
+    parser.add_argument('-t', '--target', help="The target to check", type=str, action="store", required=True)
     parser.add_argument('-p', '--protocol', help="which protocol to test", choices=["http", "ssh", "imap", "smtp"], default="http", type=str)
-    parser.add_argument('-t', '--target', help="The target to check", type=str, required=True)
     parser.add_argument('-o', '--obfuscate', help="Whether payloads should be obfuscated or not", default=False, action="store_true")
     parser.add_argument('--no-payload-domain', help="Whether the original domain should be removed from the payload", default=False, action="store_true")
     parser.add_argument('--request-path', help="A custom path to add to the requests", type=str, default=None, action="store")
     parser.add_argument('-l', '--log-level', help="How detailed logging should be.", choices=LOG_LEVELS.keys(), default="error")
 
-    http_opts = parser.add_argument_group()
+    http_opts = parser.add_argument_group("HTTP Options")
     http_opts.add_argument('--proxy', help="A proxy URL", type=str, default=None)
+
+    smtp_opts = parser.add_argument_group("SMTP Options")
+    smtp_opts.add_argument('--local-hostname', help="The localhost name to use, defaults to the hostname of the computer", type=str, default=None)
 
     callback_group = parser.add_mutually_exclusive_group()
     callback_group.add_argument('--dns-callback', help="Which built-in DNS callback to use", type=str, choices=["interact.sh", "dnslog.cn"], default="interact.sh")
@@ -439,7 +443,7 @@ def main():
     elif arguments.protocol == "imap":
         scanner = ImapScanner(arguments.obfuscate, arguments.request_path)
     elif arguments.protocol == "smtp":
-        scanner = SmtpScanner(arguments.obfuscate, arguments.request_path)
+        scanner = SmtpScanner(arguments.obfuscate, arguments.request_path, arguments.local_hostname)
 
     scanner.run_tests(
         arguments.target, callback_domain, not arguments.no_payload_domain, use_random_request_path
