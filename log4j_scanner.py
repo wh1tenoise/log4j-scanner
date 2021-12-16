@@ -9,7 +9,7 @@ import string
 import uuid
 from enum import Enum
 from time import sleep
-from urllib.parse import urlencode, urlparse
+from urllib.parse import urlparse
 
 import httpx
 from Crypto.Cipher import AES, PKCS1_OAEP
@@ -66,7 +66,7 @@ class Interactsh:
         res = self.client.post(
             f"https://{self.server}/register", headers=self.headers, json=data, timeout=30)
         if 'success' not in res.text:
-            raise Exception("Can not initiate interact.sh DNS callback client")
+            raise RuntimeError("Can not initiate interact.sh DNS callback client")
 
     def pull_logs(self):
         result = []
@@ -379,11 +379,6 @@ class SmtpScanner(BaseScanner):
             try:
                 with SMTP(host=hostname, port=port) as smtp:
                     smtp.login(payload, payload)
-            except Exception as e:
-                logging.debug(e)
-            try:
-                with SMTP(host=hostname, port=port) as smtp:
-                    smtp.auth
             except Exception as e:
                 logging.debug(e)
             try:
