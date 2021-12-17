@@ -1,7 +1,7 @@
 import random
 import string
 
-import log4j_scanner
+from log4j_scanner import log4j_scanner
 
 
 def test_obfuscate_string():
