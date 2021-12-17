@@ -7,7 +7,7 @@
         "C0301"
     ],
     "python.linting.flake8Args": [
-        "--ignore=E501",
+        "--ignore=E501,E741",
     ],
     "python.linting.pylintEnabled": false,
 }
