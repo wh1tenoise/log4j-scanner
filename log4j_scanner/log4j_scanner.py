@@ -502,7 +502,12 @@ def main():
 
     sleep(10)
     records = dns_callback.pull_logs()
-    print(records)
+    if records:
+        logging.info(f"Results: {records}")
+
+    else:
+        logging.info("No results found")
+    logging.info(f"Please keep checking {dns_callback.domain}.")
 
 
 if __name__ == "__main__":
