@@ -100,7 +100,7 @@ class Interactsh:
 
 
 PAYLOAD_PROTOCOLS = [
-    "dns", "ldap", "ldaps", "rmi",
+    "dns", "ldap", "ldaps", "rmi", "http", "corba", "iiop", "nis", "nds"
 ]
 
 OBFUSCATIONS = [
