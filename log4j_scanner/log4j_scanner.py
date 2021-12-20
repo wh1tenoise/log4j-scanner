@@ -197,10 +197,11 @@ class HttpScanner(BaseScanner):
         GetParam = "get"
         PostParam = "post"
 
-    def __init__(self, obfuscate_payloads: bool, request_path: str, path_to_clientcert: str, proxy: str, generate_clientcert: bool) -> None:
+    def __init__(self, obfuscate_payloads: bool, request_path: str, path_to_clientcert: str, proxy: str, generate_clientcert: bool, all_in_one: bool) -> None:
         super().__init__(obfuscate_payloads, request_path, path_to_clientcert)
         self.generate_clientcert = generate_clientcert
         self.proxy = proxy
+        self.all_in_one = all_in_one
 
     async def send_requests(self, client: httpx.AsyncClient, url: str, headers: dict, get_params: dict, post_params: dict) -> None:
         opened_requests = []
@@ -260,6 +261,43 @@ class HttpScanner(BaseScanner):
             except Exception as excep:
                 logging.exception(excep)
 
+    async def test_injection(self, callback_host: str, url: str, is_domain_in_callback: bool = True, choose_random_path: bool = True):
+        logging.info(f"Testing injection with {callback_host} for {url}")
+
+        target_path = self.get_request_path(choose_random_path)
+
+        for protocol in PAYLOAD_PROTOCOLS:
+            logging.info(f"Testing the {protocol} protocol handler.")
+            for include_bypass in [False, True]:
+                payload = self.create_payload(
+                    callback_host, protocol,
+                    target_path, urlparse(url).netloc,
+                    is_domain_in_callback, include_bypass
+                )
+                logging.debug(f"Using payload: {payload}")
+                params = {
+                    "q": payload,
+                    "t": payload.replace("{", r"%7B").replace("}", r"%7D")
+                }
+                data = POST_BODY.copy()
+                for key in data.keys():
+                    data[key] = data[key].replace("[PAYLOAD]", payload)
+                headers_to_inject = {
+                    header_name: f'"{payload}"' if "Cookie" != header_name else f'session="{payload}"' for header_name in HEADERS
+                }
+
+                headers = DEFAULT_HEADERS.copy()
+                headers.update(headers_to_inject)
+                # logging.debug(f"Sending request with headers: {headers}")
+                async with httpx.AsyncClient(
+                    verify=False,
+                    proxies=self.proxy,
+                    follow_redirects=True,
+                    max_redirects=3,
+                    cert=self.path_to_clientcert,
+                ) as client:
+                    await self.send_requests(client, url, headers, params, data)
+
     async def test_injection_point(self, injection_type: InjectionPointType, callback_host: str, url: str, is_domain_in_callback: bool = True, choose_random_path: bool = True):
         logging.info(f"Testing injection in {injection_type.value} with {callback_host} for {url}")
 
@@ -308,11 +346,14 @@ class HttpScanner(BaseScanner):
                         await self.send_requests(client, url, headers, params, data)
 
     async def test_all_injection_points(self, url: str, callback: str, domain_in_callback: bool = True, has_random_request_path: bool = True):
-        for injection_type in self.InjectionPointType:
-            try:
-                await self.test_injection_point(injection_type, callback, url, domain_in_callback, has_random_request_path)
-            except Exception as excep:
-                logging.exception(str(excep))
+        try:
+            if self.all_in_one:
+                await self.test_injection(callback, url, domain_in_callback, has_random_request_path)
+            else:
+                for injection_type in self.InjectionPointType:
+                    await self.test_injection_point(injection_type, callback, url, domain_in_callback, has_random_request_path)
+        except Exception as excep:
+            logging.exception(str(excep))
 
     def run_tests(self, target: str, callback_domain: str, is_domain_in_callback: bool, use_random_request_path: bool):
         if self.generate_clientcert and not self.path_to_clientcert:
@@ -452,6 +493,7 @@ def parse_arguments() -> argparse.Namespace:
     http_opts = parser.add_argument_group("HTTP Options")
     http_opts.add_argument('--proxy', help="A proxy URL", type=str, default=None)
     http_opts.add_argument('--generate-clientcert', help="Generates a client certificate.", action="store_true", default=False)
+    http_opts.add_argument('--all-in-one', help="Test all headers in one iteration", action="store_true", default=False)
 
     smtp_opts = parser.add_argument_group("SMTP Options")
     smtp_opts.add_argument('--local-hostname', help="The localhost name to use, defaults to the hostname of the computer", type=str, default=None)
@@ -488,7 +530,7 @@ def main():
         callback_domain = dns_callback.domain
 
     if arguments.protocol == "http":
-        scanner = HttpScanner(arguments.obfuscate, arguments.request_path, arguments.certificate_path, arguments.proxy, arguments.generate_clientcert)
+        scanner = HttpScanner(arguments.obfuscate, arguments.request_path, arguments.certificate_path, arguments.proxy, arguments.generate_clientcert, arguments.all_in_one)
     elif arguments.protocol == "ssh":
         scanner = SshScanner(arguments.obfuscate, arguments.request_path, arguments.certificate_path)
     elif arguments.protocol == "imap":
