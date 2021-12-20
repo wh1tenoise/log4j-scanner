@@ -99,7 +99,7 @@ class Interactsh:
         return new_log_entry
 
 
-PROTOCOLS = [
+PAYLOAD_PROTOCOLS = [
     "dns", "ldap", "ldaps", "rmi",
 ]
 
@@ -265,7 +265,7 @@ class HttpScanner(BaseScanner):
 
         target_path = self.get_request_path(choose_random_path)
 
-        for protocol in PROTOCOLS:
+        for protocol in PAYLOAD_PROTOCOLS:
             logging.info(f"Testing the {protocol} protocol handler.")
             for include_bypass in [False, True]:
                 payload = self.create_payload(
@@ -350,7 +350,7 @@ class SshScanner(BaseScanner):
             hostname = target
             port = 22
         logging.info(f"Checking {hostname} on port {port} over SSH.")
-        for protocol in PROTOCOLS:
+        for protocol in PAYLOAD_PROTOCOLS:
             for include_bypass in [False, True]:
                 payload = self.create_payload(
                     callback_domain, protocol,
@@ -384,7 +384,7 @@ class ImapScanner(BaseScanner):
             hostname = target
             port = 993
         logging.info(f"Checking {hostname} on port {port} over IMAP.")
-        for protocol in PROTOCOLS:
+        for protocol in PAYLOAD_PROTOCOLS:
             for include_bypass in [False, True]:
                 payload = self.create_payload(
                     callback_domain, protocol,
@@ -414,7 +414,7 @@ class SmtpScanner(BaseScanner):
             hostname = target
             port = 25
         logging.info(f"Checking {hostname} on port {port} over SMTP.")
-        for protocol in PROTOCOLS:
+        for protocol in PAYLOAD_PROTOCOLS:
             for include_bypass in [False, True]:
                 payload = self.create_payload(
                     callback_domain, protocol,
@@ -438,13 +438,16 @@ class SmtpScanner(BaseScanner):
 def parse_arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser("A scanner to check for the log4j vulnerability")
 
-    parser.add_argument('-t', '--target', help="The target to check", type=str, action="store", required=True)
+    target_opts = parser.add_mutually_exclusive_group(required=True)
+    target_opts.add_argument('-t', '--target', help="The target to check", type=str, action="store", default=None)
+    target_opts.add_argument('--target-list', help="The target to check", type=str, action="store", default=None)
+
     parser.add_argument('-p', '--protocol', help="which protocol to test", choices=["http", "ssh", "imap", "smtp"], default="http", type=str)
     parser.add_argument('-o', '--obfuscate', help="Whether payloads should be obfuscated or not", default=False, action="store_true")
     parser.add_argument('--certificate-path', help="Path to a client certificate for mTLS or SSH.", type=str, action="store", default=None)
     parser.add_argument('--no-payload-domain', help="Whether the original domain should be removed from the payload", default=False, action="store_true")
     parser.add_argument('--request-path', help="A custom path to add to the requests", type=str, default=None, action="store")
-    parser.add_argument('-l', '--log-level', help="How detailed logging should be.", choices=LOG_LEVELS.keys(), default="error")
+    parser.add_argument('-l', '--log-level', help="How detailed logging should be.", choices=LOG_LEVELS.keys(), default="info")
 
     http_opts = parser.add_argument_group("HTTP Options")
     http_opts.add_argument('--proxy', help="A proxy URL", type=str, default=None)
@@ -493,9 +496,16 @@ def main():
     elif arguments.protocol == "smtp":
         scanner = SmtpScanner(arguments.obfuscate, arguments.request_path, arguments.local_hostname)
 
-    scanner.run_tests(
-        arguments.target, callback_domain, not arguments.no_payload_domain, use_random_request_path
-    )
+    if arguments.target_list:
+        with open(arguments.target_list, 'r') as targets:
+            for target in targets.readlines():
+                scanner.run_tests(
+                    target, callback_domain, not arguments.no_payload_domain, use_random_request_path
+                )
+    else:
+        scanner.run_tests(
+            arguments.target, callback_domain, not arguments.no_payload_domain, use_random_request_path
+        )
 
     if not dns_callback:
         return
@@ -504,7 +514,7 @@ def main():
     records = dns_callback.pull_logs()
     if records:
         logging.info(f"Results: {records}")
-
+        print(records)
     else:
         logging.info("No results found")
     logging.info(f"Please keep checking {dns_callback.domain}.")
