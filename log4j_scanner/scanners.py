@@ -13,7 +13,7 @@ from imap_tools import MailBox
 from paramiko import SSHClient
 from paramiko.client import WarningPolicy
 
-from utils import generate_client_cert
+from log4j_scanner.utils import generate_client_cert
 
 HEADERS = [
     "Referer",

@@ -6,7 +6,7 @@ import random
 import uuid
 from time import sleep
 
-from scanners import HttpScanner, SmtpScanner, ImapScanner, SshScanner, RawSocketScanner
+from log4j_scanner.scanners import HttpScanner, SmtpScanner, ImapScanner, SshScanner, RawSocketScanner
 
 import httpx
 from Crypto.Cipher import AES, PKCS1_OAEP
