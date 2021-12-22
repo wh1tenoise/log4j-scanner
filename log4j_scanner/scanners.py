@@ -1,4 +1,5 @@
 import asyncio
+from asyncio.tasks import Task
 import logging
 import random
 import smtplib
@@ -7,13 +8,14 @@ import string
 from enum import Enum
 from smtplib import SMTP
 from urllib.parse import urlparse
+from queue import Queue
 
 import httpx
 from imap_tools import MailBox
 from paramiko import SSHClient
 from paramiko.client import WarningPolicy
 
-from log4j_scanner.utils import generate_client_cert
+from utils import generate_client_cert
 
 HEADERS = [
     "Referer",
@@ -56,12 +58,15 @@ class BaseScanner:
     request_path = None
     path_to_clientcert = None
     include_bypass = False
+    targets = Queue()
 
-    def __init__(self, obfuscate_payloads: bool, request_path: str, include_bypass: bool, path_to_clientcert: str = None) -> None:
+    def __init__(self, targets: list, obfuscate_payloads: bool, request_path: str, include_bypass: bool, path_to_clientcert: str = None) -> None:
         self.obfuscate_payloads = obfuscate_payloads
         self.request_path = request_path
         self.include_bypass = include_bypass
         self.path_to_clientcert = path_to_clientcert
+        for target in targets:
+            self.targets.put_nowait(target)
 
     def get_request_path(self, choose_random_path):
         if choose_random_path or self.request_path is None:
@@ -98,7 +103,7 @@ class BaseScanner:
             path=test_path
         )
 
-    def run_tests(self, target: str, callback_domain: str, is_domain_in_callback: bool, use_random_request_path: bool):
+    def run_tests(self, callback_domain: str, is_domain_in_callback: bool, use_random_request_path: bool):
         raise NotImplementedError("Use a subclass to run tests.")
 
 
@@ -110,8 +115,8 @@ class HttpScanner(BaseScanner):
         GetParam = "get"
         PostParam = "post"
 
-    def __init__(self, obfuscate_payloads: bool, request_path: str, include_bypass: bool, path_to_clientcert: str, proxy: str, generate_clientcert: bool, all_in_one: bool) -> None:
-        super().__init__(obfuscate_payloads, request_path, include_bypass, path_to_clientcert)
+    def __init__(self, targets: list, obfuscate_payloads: bool, request_path: str, include_bypass: bool, path_to_clientcert: str, proxy: str, generate_clientcert: bool, all_in_one: bool) -> None:
+        super().__init__(targets, obfuscate_payloads, request_path, include_bypass, path_to_clientcert)
         self.generate_clientcert = generate_clientcert
         self.proxy = proxy
         self.all_in_one = all_in_one
@@ -169,7 +174,7 @@ class HttpScanner(BaseScanner):
             try:
                 resp: httpx.Response = await request
                 logging.debug(f"{resp.status_code}: {resp.reason_phrase}")
-            except httpx.ConnectTimeout:
+            except (httpx.ConnectTimeout, httpx.ReadTimeout):
                 pass
             except Exception as excep:
                 logging.exception(excep)
@@ -256,7 +261,7 @@ class HttpScanner(BaseScanner):
                 ) as client:
                     await self.send_requests(client, url, headers, params, data)
 
-    async def test_all_injection_points(self, url: str, callback: str, domain_in_callback: bool = True, has_random_request_path: bool = True):
+    async def run_test_of_target(self, url: str, callback: str, domain_in_callback: bool = True, has_random_request_path: bool = True):
         try:
             if self.all_in_one:
                 await self.test_injection(callback, url, domain_in_callback, has_random_request_path)
@@ -266,151 +271,172 @@ class HttpScanner(BaseScanner):
         except Exception as excep:
             logging.exception(str(excep))
 
-    def run_tests(self, target: str, callback_domain: str, is_domain_in_callback: bool, use_random_request_path: bool):
+    async def test_all_injection_points(self, callback_domain: str, is_domain_in_callback: bool, use_random_request_path: bool):
+        tasks: list[Task] = []
+        while self.targets.qsize() > 0:
+            target = self.targets.get_nowait()
+            tasks.append(
+                asyncio.create_task(
+                    self.run_test_of_target(
+                        target, callback_domain, not is_domain_in_callback, use_random_request_path
+                    )
+                )
+            )
+        for task in tasks:
+            await task
+
+    def run_tests(self, callback_domain: str, is_domain_in_callback: bool, use_random_request_path: bool):
         if self.generate_clientcert and not self.path_to_clientcert:
-            target_domain = urlparse(target).netloc
             payload = self.create_payload(
                 callback_domain, "dns",
                 self.get_request_path(use_random_request_path),
-                target_domain,
+                "certificate",
                 is_domain_in_callback,
                 self.include_bypass
             )
             generate_client_cert(
-                emailAddress=f"{smtplib.quoteaddr(payload)}@{target_domain}",
+                emailAddress=f"{smtplib.quoteaddr(payload)}@gmail.com",
                 commonName=payload,
-                subjectAltName=[f"DNS:{payload}"]
+                subjectAltName=[f"DNS:{payload}"],
             )
-            self.path_to_clientcert = "./injection.crt"
+            self.path_to_clientcert = "./injection.pem"
         asyncio.run(
             self.test_all_injection_points(
-                target, callback_domain, not is_domain_in_callback, use_random_request_path
+                callback_domain, is_domain_in_callback, use_random_request_path
             )
         )
 
 
 class SshScanner(BaseScanner):
 
-    def __init__(self, obfuscate_payloads: bool, request_path: str, include_bypass: bool, path_to_clientcert: str = None) -> None:
-        super().__init__(obfuscate_payloads, request_path, include_bypass, path_to_clientcert)
+    def __init__(self, targets: list, obfuscate_payloads: bool, request_path: str, include_bypass: bool, path_to_clientcert: str = None) -> None:
+        super().__init__(targets, obfuscate_payloads, request_path, include_bypass, path_to_clientcert)
         self._client = SSHClient()
         self._client.set_missing_host_key_policy(WarningPolicy)
 
-    def run_tests(self, target: str, callback_domain: str, is_domain_in_callback: bool, use_random_request_path: bool):
-        if ":" in target:
-            hostname, port = target.split(':')
-        else:
-            hostname = target
-            port = 22
-        logging.info(f"Checking {hostname} on port {port} over SSH.")
-        for protocol in PAYLOAD_PROTOCOLS:
-            payload = self.create_payload(
-                callback_domain, protocol,
-                self.get_request_path(use_random_request_path),
-                target,
-                is_domain_in_callback,
-                self.include_bypass
-            )
-            try:
-                self._client.connect(hostname=hostname, port=port, username=payload, password=payload, timeout=3, look_for_keys=False, auth_timeout=2)
-                self._client.close()
-            except Exception as e:
-                logging.debug(e)
-            if self.path_to_clientcert:
+    def run_tests(self, callback_domain: str, is_domain_in_callback: bool, use_random_request_path: bool):
+        while self.targets.qsize() != 0:
+            target = self.targets.get()
+            if ":" in target:
+                hostname, port = target.split(':')
+            else:
+                hostname = target
+                port = 22
+            logging.info(f"Checking {hostname} on port {port} over SSH.")
+            for protocol in PAYLOAD_PROTOCOLS:
+                payload = self.create_payload(
+                    callback_domain, protocol,
+                    self.get_request_path(use_random_request_path),
+                    target,
+                    is_domain_in_callback,
+                    self.include_bypass
+                )
                 try:
-                    self._client.connect(hostname=hostname, port=port, username=payload, key_filename=self.path_to_clientcert, timeout=3, look_for_keys=False, auth_timeout=2)
+                    self._client.connect(hostname=hostname, port=port, username=payload, password=payload, timeout=3, look_for_keys=False, auth_timeout=2)
                     self._client.close()
                 except Exception as e:
                     logging.debug(e)
+                if self.path_to_clientcert:
+                    try:
+                        self._client.connect(hostname=hostname, port=port, username=payload, key_filename=self.path_to_clientcert, timeout=3, look_for_keys=False, auth_timeout=2)
+                        self._client.close()
+                    except Exception as e:
+                        logging.debug(e)
 
 
 class ImapScanner(BaseScanner):
 
-    def __init__(self, obfuscate_payloads: bool, request_path: str, include_bypass: bool) -> None:
-        super().__init__(obfuscate_payloads, request_path, include_bypass)
+    def __init__(self, targets: list, obfuscate_payloads: bool, request_path: str, include_bypass: bool) -> None:
+        super().__init__(targets, obfuscate_payloads, request_path, include_bypass)
 
-    def run_tests(self, target: str, callback_domain: str, is_domain_in_callback: bool, use_random_request_path: bool):
-        if ":" in target:
-            hostname, port = target.split(':')
-        else:
-            hostname = target
-            port = 993
-        logging.info(f"Checking {hostname} on port {port} over IMAP.")
-        for protocol in PAYLOAD_PROTOCOLS:
-            payload = self.create_payload(
-                callback_domain, protocol,
-                self.get_request_path(use_random_request_path),
-                target,
-                is_domain_in_callback,
-                self.include_bypass
-            )
-            try:
-                mailbox = MailBox(hostname, port=port)
-                mailbox.login(payload, payload, initial_folder=payload)
-                mailbox.logout()
-            except Exception as e:
-                logging.debug(e)
+    def run_tests(self, callback_domain: str, is_domain_in_callback: bool, use_random_request_path: bool):
+        while self.targets.qsize() != 0:
+            target = self.targets.get()
+            if ":" in target:
+                hostname, port = target.split(':')
+            else:
+                hostname = target
+                port = 993
+            logging.info(f"Checking {hostname} on port {port} over IMAP.")
+            for protocol in PAYLOAD_PROTOCOLS:
+                payload = self.create_payload(
+                    callback_domain, protocol,
+                    self.get_request_path(use_random_request_path),
+                    target,
+                    is_domain_in_callback,
+                    self.include_bypass
+                )
+                try:
+                    mailbox = MailBox(hostname, port=port)
+                    mailbox.login(payload, payload, initial_folder=payload)
+                    mailbox.logout()
+                except Exception as e:
+                    logging.debug(e)
 
 
 class SmtpScanner(BaseScanner):
 
-    def __init__(self, obfuscate_payloads: bool, request_path: str, include_bypass: bool, local_hostname: str) -> None:
-        super().__init__(obfuscate_payloads, request_path, include_bypass)
+    def __init__(self, targets: list, obfuscate_payloads: bool, request_path: str, include_bypass: bool, local_hostname: str) -> None:
+        super().__init__(targets, obfuscate_payloads, request_path, include_bypass)
         self._local_hostname = local_hostname
 
-    def run_tests(self, target: str, callback_domain: str, is_domain_in_callback: bool, use_random_request_path: bool):
-        if ":" in target:
-            hostname, port = target.split(':')
-        else:
-            hostname = target
-            port = 25
-        logging.info(f"Checking {hostname} on port {port} over SMTP.")
-        for protocol in PAYLOAD_PROTOCOLS:
-            payload = self.create_payload(
-                callback_domain, protocol,
-                self.get_request_path(use_random_request_path),
-                target,
-                is_domain_in_callback,
-                self.include_bypass
-            )
-            try:
-                with SMTP(host=hostname, port=port, local_hostname=self._local_hostname) as smtp:
-                    smtp.login(payload, payload)
-            except Exception as e:
-                logging.debug(e)
-            try:
-                with SMTP(host=hostname, port=port, local_hostname=self._local_hostname) as smtp:
-                    smtp.sendmail(f"{smtplib.quoteaddr(payload)}@test.com", f"{smtplib.quoteaddr(payload)}@{hostname}", smtplib.quotedata(payload))
-            except Exception as e:
-                logging.debug(e)
+    def run_tests(self, callback_domain: str, is_domain_in_callback: bool, use_random_request_path: bool):
+        while self.targets.qsize() != 0:
+            target = self.targets.get()
+            if ":" in target:
+                hostname, port = target.split(':')
+            else:
+                hostname = target
+                port = 25
+            logging.info(f"Checking {hostname} on port {port} over SMTP.")
+            for protocol in PAYLOAD_PROTOCOLS:
+                payload = self.create_payload(
+                    callback_domain, protocol,
+                    self.get_request_path(use_random_request_path),
+                    target,
+                    is_domain_in_callback,
+                    self.include_bypass
+                )
+                try:
+                    with SMTP(host=hostname, port=port, local_hostname=self._local_hostname) as smtp:
+                        smtp.login(payload, payload)
+                except Exception as e:
+                    logging.debug(e)
+                try:
+                    with SMTP(host=hostname, port=port, local_hostname=self._local_hostname) as smtp:
+                        smtp.sendmail(f"{smtplib.quoteaddr(payload)}@test.com", f"{smtplib.quoteaddr(payload)}@{hostname}", smtplib.quotedata(payload))
+                except Exception as e:
+                    logging.debug(e)
 
 
 class RawSocketScanner(BaseScanner):
 
-    def __init__(self, obfuscate_payloads: bool, request_path: str, include_bypass: bool) -> None:
-        super().__init__(obfuscate_payloads, request_path, include_bypass)
+    def __init__(self, targets: list, obfuscate_payloads: bool, request_path: str, include_bypass: bool) -> None:
+        super().__init__(targets, obfuscate_payloads, request_path, include_bypass)
 
-    def run_tests(self, target: str, callback_domain: str, is_domain_in_callback: bool, use_random_request_path: bool):
-        if ":" in target:
-            hostname, port = target.split(':')
-            port = int(port)
-        else:
-            hostname = target
-            port = 80
-        logging.info(f"Checking {hostname} on port {port} over raw sockets.")
-        for protocol in PAYLOAD_PROTOCOLS:
-            payload = self.create_payload(
-                callback_domain, protocol,
-                self.get_request_path(use_random_request_path),
-                target,
-                is_domain_in_callback,
-                self.include_bypass
-            )
-            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            try:
-                s.connect((hostname, port))
-                s.send(payload.encode())
-            except socket.error as e:
-                logging.debug(e)
-            finally:
-                s.close()
+    def run_tests(self, callback_domain: str, is_domain_in_callback: bool, use_random_request_path: bool):
+        while self.targets.qsize() != 0:
+            target = self.targets.get()
+            if ":" in target:
+                hostname, port = target.split(':')
+                port = int(port)
+            else:
+                hostname = target
+                port = 80
+            logging.info(f"Checking {hostname} on port {port} over raw sockets.")
+            for protocol in PAYLOAD_PROTOCOLS:
+                payload = self.create_payload(
+                    callback_domain, protocol,
+                    self.get_request_path(use_random_request_path),
+                    target,
+                    is_domain_in_callback,
+                    self.include_bypass
+                )
+                s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                try:
+                    s.connect((hostname, port))
+                    s.send(payload.encode())
+                except socket.error as e:
+                    logging.debug(e)
+                finally:
+                    s.close()

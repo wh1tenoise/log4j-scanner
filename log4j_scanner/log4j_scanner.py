@@ -6,7 +6,7 @@ import random
 import uuid
 from time import sleep
 
-from log4j_scanner.scanners import HttpScanner, SmtpScanner, ImapScanner, SshScanner, RawSocketScanner
+from scanners import HttpScanner, SmtpScanner, ImapScanner, SshScanner, RawSocketScanner
 
 import httpx
 from Crypto.Cipher import AES, PKCS1_OAEP
@@ -151,20 +151,7 @@ def main():
             dns_callback = Dnslog()
         callback_domain = dns_callback.domain
 
-    if arguments.protocol == "http":
-        scanner = HttpScanner(
-            arguments.obfuscate, arguments.request_path, arguments.use_localhost_bypass,
-            arguments.certificate_path, arguments.proxy, arguments.generate_clientcert, arguments.all_in_one
-        )
-    elif arguments.protocol == "ssh":
-        scanner = SshScanner(arguments.obfuscate, arguments.request_path, arguments.use_localhost_bypass, arguments.certificate_path)
-    elif arguments.protocol == "imap":
-        scanner = ImapScanner(arguments.obfuscate, arguments.request_path, arguments.use_localhost_bypass)
-    elif arguments.protocol == "smtp":
-        scanner = SmtpScanner(arguments.obfuscate, arguments.request_path, arguments.use_localhost_bypass, arguments.local_hostname)
-    elif arguments.protocol == "socket":
-        scanner = RawSocketScanner(arguments.obfuscate, arguments.request_path, arguments.use_localhost_bypass)
-
+    scan_targets = []
     if arguments.target_list:
         with open(arguments.target_list, 'r') as targets:
             for target in targets.readlines():
@@ -172,29 +159,50 @@ def main():
                     scan_target = f"http://{target}/"
                 else:
                     scan_target = target
-                scanner.run_tests(
-                    scan_target, callback_domain, not arguments.no_payload_domain, use_random_request_path
-                )
+                scan_targets.append(scan_target)
     else:
         if arguments.target[:4] != "http" and arguments.protocol == "http":
             scan_target = f"http://{arguments.target}/"
         else:
             scan_target = arguments.target
-        scanner.run_tests(
-            scan_target, callback_domain, not arguments.no_payload_domain, use_random_request_path
+        scan_targets.append(scan_target)
+
+    if arguments.protocol == "http":
+        scanner = HttpScanner(
+            scan_targets,
+            arguments.obfuscate, arguments.request_path, arguments.use_localhost_bypass,
+            arguments.certificate_path, arguments.proxy, arguments.generate_clientcert, arguments.all_in_one
         )
+    elif arguments.protocol == "ssh":
+        scanner = SshScanner(scan_targets, arguments.obfuscate, arguments.request_path, arguments.use_localhost_bypass, arguments.certificate_path)
+    elif arguments.protocol == "imap":
+        scanner = ImapScanner(scan_targets, arguments.obfuscate, arguments.request_path, arguments.use_localhost_bypass)
+    elif arguments.protocol == "smtp":
+        scanner = SmtpScanner(scan_targets, arguments.obfuscate, arguments.request_path, arguments.use_localhost_bypass, arguments.local_hostname)
+    elif arguments.protocol == "socket":
+        scanner = RawSocketScanner(scan_targets, arguments.obfuscate, arguments.request_path, arguments.use_localhost_bypass)
+
+    scanner.run_tests(
+        callback_domain, not arguments.no_payload_domain, use_random_request_path
+    )
 
     if not dns_callback:
+        logging.info("Keep monitoring your callback for interactions.")
         return
 
-    sleep(10)
-    records = dns_callback.pull_logs()
+    count = 0
+    records = []
+    sleep_time = 10
+    while count < 3 and not records:
+        logging.info(f"Try #{count + 1} of getting records... Sleeping for {sleep_time}s")
+        sleep(sleep_time)
+        records = dns_callback.pull_logs()
+        count += 1
     if records:
         logging.info(f"Results: {records}")
         print(records)
     else:
         logging.info("No results found")
-    logging.info(f"Please keep checking {dns_callback.domain}.")
 
 
 if __name__ == "__main__":
