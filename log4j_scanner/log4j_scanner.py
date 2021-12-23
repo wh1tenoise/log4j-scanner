@@ -104,7 +104,7 @@ def parse_arguments() -> argparse.Namespace:
     target_opts.add_argument('-t', '--target', help="The target to check", type=str, action="store", default=None)
     target_opts.add_argument('--target-list', help="The target to check", type=str, action="store", default=None)
 
-    parser.add_argument('-p', '--protocol', help="which protocol to test", choices=["http", "ssh", "imap", "smtp", "socket"], default="http", type=str)
+    parser.add_argument('-p', '--protocol', help="which protocol to test", choices=["http", "ssh", "imap", "smtp", "socket", "ftp", "postgres"], default="http", type=str)
     parser.add_argument('-o', '--obfuscate', help="Whether payloads should be obfuscated or not", default=False, action="store_true")
     parser.add_argument('--certificate-path', help="Path to a client certificate for mTLS or SSH.", type=str, action="store", default=None)
     parser.add_argument('--no-payload-domain', help="Whether the original domain should be removed from the payload", default=False, action="store_true")

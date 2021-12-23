@@ -214,7 +214,7 @@ class HttpScanner(BaseScanner):
                 key: payload for key in POST_BODY_PARAMETERS
             }
             headers_to_inject = {
-                header_name: f'"{payload}"' if "Cookie" != header_name else f'session="{payload}"' for header_name in HEADERS
+                header_name: f'{payload}' if "Cookie" != header_name else f'session="{payload}"' for header_name in HEADERS
             }
 
             headers = DEFAULT_HEADERS.copy()
