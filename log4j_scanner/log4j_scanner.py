@@ -6,7 +6,7 @@ import random
 import uuid
 from time import sleep
 
-from scanners import HttpScanner, SmtpScanner, ImapScanner, SshScanner, RawSocketScanner
+from scanners import HttpScanner, SmtpScanner, ImapScanner, SshScanner, RawSocketScanner, FtpScanner, PostgresScanner
 
 import httpx
 from Crypto.Cipher import AES, PKCS1_OAEP
@@ -181,6 +181,10 @@ def main():
         scanner = SmtpScanner(scan_targets, arguments.obfuscate, arguments.request_path, arguments.use_localhost_bypass, arguments.local_hostname)
     elif arguments.protocol == "socket":
         scanner = RawSocketScanner(scan_targets, arguments.obfuscate, arguments.request_path, arguments.use_localhost_bypass)
+    elif arguments.protocol == "ftp":
+        scanner = FtpScanner(scan_targets, arguments.obfuscate, arguments.request_path, arguments.use_localhost_bypass)
+    elif arguments.protocol == "postgres":
+        scanner = PostgresScanner(scan_targets, arguments.obfuscate, arguments.request_path, arguments.use_localhost_bypass)
 
     scanner.run_tests(
         callback_domain, not arguments.no_payload_domain, use_random_request_path

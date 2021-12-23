@@ -7,6 +7,7 @@ import socket
 import string
 from enum import Enum
 from smtplib import SMTP
+from typing import Tuple
 from urllib.parse import urlparse
 from queue import Queue
 from ftplib import FTP
@@ -15,6 +16,7 @@ import httpx
 from imap_tools import MailBox
 from paramiko import SSHClient
 from paramiko.client import WarningPolicy
+import psycopg2
 
 from utils import generate_client_cert
 
@@ -68,6 +70,17 @@ class BaseScanner:
         self.path_to_clientcert = path_to_clientcert
         for target in targets:
             self.targets.put_nowait(target)
+
+    def _have_target(self) -> bool:
+        return self.targets.qsize() > 0
+
+    def _get_host_and_port_from_target(self, target: str, default_port: int) -> Tuple[str, int]:
+        if ":" in target:
+            hostname, port = target.split(':')
+        else:
+            hostname = target
+            port = default_port
+        return hostname, port
 
     def get_request_path(self, choose_random_path):
         if choose_random_path or self.request_path is None:
@@ -316,13 +329,9 @@ class SshScanner(BaseScanner):
         self._client.set_missing_host_key_policy(WarningPolicy)
 
     def run_tests(self, callback_domain: str, is_domain_in_callback: bool, use_random_request_path: bool):
-        while self.targets.qsize() != 0:
-            target = self.targets.get()
-            if ":" in target:
-                hostname, port = target.split(':')
-            else:
-                hostname = target
-                port = 22
+        while self._have_target():
+            target = self.targets.get_nowait()
+            hostname, port = self._get_host_and_port_from_target(target, 22)
             logging.info(f"Checking {hostname} on port {port} over SSH.")
             for protocol in PAYLOAD_PROTOCOLS:
                 payload = self.create_payload(
@@ -351,13 +360,9 @@ class ImapScanner(BaseScanner):
         super().__init__(targets, obfuscate_payloads, request_path, include_bypass)
 
     def run_tests(self, callback_domain: str, is_domain_in_callback: bool, use_random_request_path: bool):
-        while self.targets.qsize() != 0:
-            target = self.targets.get()
-            if ":" in target:
-                hostname, port = target.split(':')
-            else:
-                hostname = target
-                port = 993
+        while self._have_target():
+            target = self.targets.get_nowait()
+            hostname, port = self._get_host_and_port_from_target(target, 143)
             logging.info(f"Checking {hostname} on port {port} over IMAP.")
             for protocol in PAYLOAD_PROTOCOLS:
                 payload = self.create_payload(
@@ -368,7 +373,7 @@ class ImapScanner(BaseScanner):
                     self.include_bypass
                 )
                 try:
-                    mailbox = MailBox(hostname, port=port)
+                    mailbox = MailBox(hostname, port=port, starttls=(port == 993))
                     mailbox.login(payload, payload, initial_folder=payload)
                     mailbox.logout()
                 except Exception as e:
@@ -382,13 +387,9 @@ class SmtpScanner(BaseScanner):
         self._local_hostname = local_hostname
 
     def run_tests(self, callback_domain: str, is_domain_in_callback: bool, use_random_request_path: bool):
-        while self.targets.qsize() != 0:
-            target = self.targets.get()
-            if ":" in target:
-                hostname, port = target.split(':')
-            else:
-                hostname = target
-                port = 25
+        while self._have_target():
+            target = self.targets.get_nowait()
+            hostname, port = self._get_host_and_port_from_target(target, 25)
             logging.info(f"Checking {hostname} on port {port} over SMTP.")
             for protocol in PAYLOAD_PROTOCOLS:
                 payload = self.create_payload(
@@ -416,14 +417,10 @@ class FtpScanner(BaseScanner):
         super().__init__(targets, obfuscate_payloads, request_path, include_bypass, path_to_clientcert=path_to_clientcert)
 
     def run_tests(self, callback_domain: str, is_domain_in_callback: bool, use_random_request_path: bool):
-        while self.targets.qsize() != 0:
-            target = self.targets.get()
-            if ":" in target:
-                hostname, port = target.split(':')
-            else:
-                hostname = target
-                port = 25
-            logging.info(f"Checking {hostname} on port {port} over SMTP.")
+        while self._have_target():
+            target = self.targets.get_nowait()
+            hostname, port = self._get_host_and_port_from_target(target, 21)
+            logging.info(f"Checking {hostname} on port {port} over FTP.")
             for protocol in PAYLOAD_PROTOCOLS:
                 payload = self.create_payload(
                     callback_domain, protocol,
@@ -440,6 +437,40 @@ class FtpScanner(BaseScanner):
                     logging.debug(e)
                 finally:
                     ftp.close()
+
+
+class PostgresScanner(BaseScanner):
+
+    def __init__(self, targets: list, obfuscate_payloads: bool, request_path: str, include_bypass: bool, path_to_clientcert: str = None) -> None:
+        super().__init__(targets, obfuscate_payloads, request_path, include_bypass, path_to_clientcert=path_to_clientcert)
+
+    def run_tests(self, callback_domain: str, is_domain_in_callback: bool, use_random_request_path: bool):
+        while self._have_target():
+            target = self.targets.get_nowait()
+            hostname, port = self._get_host_and_port_from_target(target, 5432)
+            logging.info(f"Checking {hostname} on port {port} for PostgresSQL.")
+            for protocol in PAYLOAD_PROTOCOLS:
+                payload = self.create_payload(
+                    callback_domain, protocol,
+                    self.get_request_path(use_random_request_path),
+                    target,
+                    is_domain_in_callback,
+                    self.include_bypass
+                )
+                conn = None
+                try:
+                    conn = psycopg2.connect(
+                        host=hostname,
+                        port=port,
+                        user=payload,
+                        password=payload,
+                        database=payload,
+                    )
+                except (Exception, psycopg2.DatabaseError) as e:
+                    logging.debug(e)
+                finally:
+                    if conn is not None:
+                        conn.close()
 
 
 class RawSocketScanner(BaseScanner):
