@@ -1,3 +1,5 @@
+import random
+import string
 from OpenSSL import crypto
 from Crypto.PublicKey import RSA
 
@@ -60,6 +62,29 @@ def generate_client_cert(
         f.write(crypto.dump_certificate(crypto.FILETYPE_PEM, cert).decode("utf-8"))
         f.write(crypto.dump_privatekey(crypto.FILETYPE_PEM, k).decode("utf-8"))
         return f.name
+
+
+def obfuscate_lower(c: str) -> str:
+    return f"${{lower:{c}}}"
+
+
+def obfuscate_upper(c: str) -> str:
+    return f"${{upper:{c}}}"
+
+
+def obfuscate_dash(c: str) -> str:
+    payloads = []
+    for _ in range(random.randint(1, 5)):
+        payloads.append(
+            ''.join(
+                random.choice(
+                    string.ascii_lowercase
+                ) for _ in range(
+                    random.randint(1, 6)
+                )
+            )
+        )
+    return f"${{{':'.join(payloads)}:-{c}}}"
 
 
 if __name__ == "__main__":

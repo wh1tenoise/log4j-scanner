@@ -18,7 +18,7 @@ from paramiko import SSHClient
 from paramiko.client import WarningPolicy
 import psycopg2
 
-from utils import generate_client_cert
+from utils import generate_client_cert, obfuscate_dash, obfuscate_lower, obfuscate_upper
 
 HEADERS = [
     "Referer",
@@ -52,7 +52,7 @@ PAYLOAD_PROTOCOLS = [
 ]
 
 OBFUSCATIONS = [
-    r"[CHAR]", r"${::-[CHAR]}", r"${lower:[CHAR]}", r"${upper:[CHAR]}"
+    lambda char: char, obfuscate_upper, obfuscate_lower, obfuscate_dash
 ]
 
 
@@ -92,10 +92,8 @@ class BaseScanner:
     def _obfuscate_string(self, to_obfuscate: str) -> str:
         out = []
         for char in to_obfuscate:
-            obfuscation: str = random.choice(OBFUSCATIONS)
-            if "${" in obfuscation and "${::" not in obfuscation:
-                obfuscation = obfuscation.replace("[CHAR]", random.choice(OBFUSCATIONS))
-            out.append(obfuscation.replace("[CHAR]", char))
+            obfuscation = random.choice(OBFUSCATIONS)
+            out.append(obfuscation(char))
         return "".join(out)
 
     def create_payload(
