@@ -18,7 +18,7 @@ from paramiko import SSHClient
 from paramiko.client import WarningPolicy
 import psycopg2
 
-from utils import generate_client_cert, obfuscate_dash, obfuscate_lower, obfuscate_upper
+from log4j_scanner.utils import generate_client_cert, obfuscate_dash, obfuscate_lower, obfuscate_upper
 
 HEADERS = [
     "Referer",
@@ -285,7 +285,7 @@ class HttpScanner(BaseScanner):
 
     async def test_all_injection_points(self, callback_domain: str, is_domain_in_callback: bool, use_random_request_path: bool):
         tasks: list[Task] = []
-        while self.targets.qsize() > 0:
+        while self._have_target():
             target = self.targets.get_nowait()
             tasks.append(
                 asyncio.create_task(
