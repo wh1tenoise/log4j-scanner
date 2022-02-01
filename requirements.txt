@@ -1,4 +1,4 @@
-httpx==0.21.1
+httpx==0.22.0
 PyCryptodome==3.14.0
 paramiko==2.9.1
 imap-tools==0.50.2
