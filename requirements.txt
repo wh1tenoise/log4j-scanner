@@ -1,6 +1,6 @@
 httpx==0.22.0
 PyCryptodome==3.14.1
 paramiko==2.10.1
-imap-tools==0.53.0
+imap-tools==0.54.0
 pyOpenSSL==22.0.0
 psycopg2==2.9.3
