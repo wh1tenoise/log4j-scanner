@@ -1,5 +1,5 @@
 httpx==0.23.0
-PyCryptodome==3.14.1
+PyCryptodome==3.15.0
 paramiko==2.11.0
 imap-tools==0.56.0
 pyOpenSSL==22.0.0
