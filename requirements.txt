@@ -2,5 +2,5 @@ httpx==0.26.0
 PyCryptodome==3.19.1
 paramiko==3.4.0
 imap-tools==1.5.0
-pyOpenSSL==23.3.0
+pyOpenSSL==24.0.0
 psycopg2==2.9.9
